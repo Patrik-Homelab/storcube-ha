@@ -1086,7 +1086,11 @@ class StorcubeSolarEnergyTotalSensor(StorcubeBatterySensor):
             _LOGGER.error("Error updating total solar energy: %s", e)
 
 async def websocket_to_mqtt(hass: HomeAssistant, config: ConfigType, config_entry: ConfigEntry) -> None:
-    """Handle websocket connection and forward data to MQTT."""
+    """Handle websocket connection and forward data to MQTT with auto-reconnection and token refresh."""
+    device_id = config[CONF_DEVICE_ID]
+    request_data = {"reportEquip": [device_id]}
+    heartbeat_data = {"heartbeat": [device_id]}
+
     while True:
         try:
             headers = {
@@ -1141,16 +1145,25 @@ async def websocket_to_mqtt(hass: HomeAssistant, config: ConfigType, config_entr
                         ) as websocket:
                             _LOGGER.info("Connexion WebSocket établie")
                             
-                            # Send initial request
-                            request_data = {"reportEquip": [config[CONF_DEVICE_ID]]}
+                            # Send initial report and heartbeat requests
                             await websocket.send(json.dumps(request_data))
-                            _LOGGER.debug("Requête envoyée: %s", request_data)
+                            await websocket.send(json.dumps(heartbeat_data))
+                            _LOGGER.debug("Requêtes initiales envoyées: %s, %s", request_data, heartbeat_data)
 
                             last_heartbeat = datetime.now()
+                            connect_time = datetime.now()
+                            consecutive_timeouts = 0
+
                             while True:
+                                # Re-authenticate periodically (every 30 mins) before token expires
+                                if (datetime.now() - connect_time).total_seconds() > 1800:
+                                    _LOGGER.info("Proactive WebSocket token refresh (max connection duration 30 min reached). Reconnecting...")
+                                    break
+
                                 try:
                                     message = await asyncio.wait_for(websocket.recv(), timeout=30)
                                     last_heartbeat = datetime.now()
+                                    consecutive_timeouts = 0
                                     _LOGGER.debug("Message WebSocket reçu brut: %s", message)
 
                                     if message.strip():
@@ -1168,7 +1181,6 @@ async def websocket_to_mqtt(hass: HomeAssistant, config: ConfigType, config_entr
                                                 continue
                                             
                                             if isinstance(json_data, dict):
-                                                # Log toutes les clés du message
                                                 _LOGGER.debug("Structure du message reçu: %s", json_data)
                                                 
                                                 # Vérifier si c'est une réponse d'API REST
@@ -1189,14 +1201,11 @@ async def websocket_to_mqtt(hass: HomeAssistant, config: ConfigType, config_entr
                                                     # Extraire les données d'équipement pour le format WebSocket
                                                     equip_data = next(iter(json_data.values()), {})
                                                     
-                                                    # Vérifier si les données d'équipement sont valides
                                                     if equip_data and isinstance(equip_data, dict):
-                                                        # Si les données sont dans la liste
                                                         if "list" in equip_data and equip_data["list"]:
                                                             _LOGGER.info("Mise à jour des capteurs avec les données de la liste: %s", equip_data)
                                                             for sensor in hass.data[DOMAIN][config_entry.entry_id]["sensors"]:
                                                                 sensor.handle_state_update(equip_data)
-                                                        # Si les données sont au niveau racine
                                                         else:
                                                             _LOGGER.info("Mise à jour des capteurs avec les données racines: %s", equip_data)
                                                             for sensor in hass.data[DOMAIN][config_entry.entry_id]["sensors"]:
@@ -1210,27 +1219,33 @@ async def websocket_to_mqtt(hass: HomeAssistant, config: ConfigType, config_entr
                                             continue
 
                                 except asyncio.TimeoutError:
+                                    consecutive_timeouts += 1
                                     time_since_last = (datetime.now() - last_heartbeat).total_seconds()
-                                    _LOGGER.debug("Timeout WebSocket après %d secondes, envoi heartbeat...", time_since_last)
+                                    _LOGGER.debug("Timeout WebSocket after %ds (consecutive: %d)", time_since_last, consecutive_timeouts)
+                                    
+                                    if consecutive_timeouts >= 2:
+                                        _LOGGER.warning("WebSocket stalled (2 consecutive timeouts / %ds without data). Re-authenticating...", time_since_last)
+                                        break
+
                                     try:
                                         await websocket.send(json.dumps(request_data))
-                                        _LOGGER.debug("Heartbeat envoyé avec succès")
+                                        await websocket.send(json.dumps(heartbeat_data))
+                                        _LOGGER.debug("Heartbeat and reportEquip sent successfully")
                                     except Exception as e:
-                                        _LOGGER.warning("Échec de l'envoi du heartbeat: %s", str(e))
+                                        _LOGGER.warning("Failed to send heartbeat/reportEquip: %s", str(e))
                                         break
-                                    continue
 
             except Exception as e:
-                _LOGGER.error("Erreur inattendue: %s", str(e))
+                _LOGGER.error("Erreur inattendue dans WebSocket loop: %s", str(e))
                 await asyncio.sleep(5)
                 continue
 
         except Exception as e:
-            _LOGGER.error("Erreur de connexion: %s", str(e))
+            _LOGGER.error("Erreur de connexion WebSocket: %s", str(e))
             await asyncio.sleep(5)
 
 async def output_api_to_mqtt(hass: HomeAssistant, config: ConfigType, config_entry: ConfigEntry) -> None:
-    """Handle output API connection and forward data to MQTT."""
+    """Handle output API connection and forward data to MQTT with token refresh logic."""
     while True:
         try:
             headers = {
@@ -1266,9 +1281,15 @@ async def output_api_to_mqtt(hass: HomeAssistant, config: ConfigType, config_ent
                         token = token_data["data"]["token"]
                         _LOGGER.info("Token obtenu avec succès")
 
+                        token_start_time = datetime.now()
+
                         while True:
+                            # Re-authenticate every 30 minutes to prevent token expiration
+                            if (datetime.now() - token_start_time).total_seconds() > 1800:
+                                _LOGGER.info("Proactive Output API token refresh (30 min limit reached)...")
+                                break
+
                             try:
-                                # Appel à l'API output avec le token dans les headers
                                 output_url = f"{OUTPUT_URL}{config[CONF_DEVICE_ID]}"
                                 _LOGGER.debug("Appel à l'API output: %s", output_url)
                                 
@@ -1277,6 +1298,10 @@ async def output_api_to_mqtt(hass: HomeAssistant, config: ConfigType, config_ent
                                     output_url,
                                     headers=headers
                                 ) as response:
+                                    if response.status in (401, 403):
+                                        _LOGGER.warning("Output API HTTP %s received. Refreshing token...", response.status)
+                                        break
+
                                     response_text = await response.text()
                                     _LOGGER.debug("Réponse API output brute: %s", response_text)
                                     
@@ -1289,6 +1314,9 @@ async def output_api_to_mqtt(hass: HomeAssistant, config: ConfigType, config_ent
                                                 _LOGGER.info("Mise à jour des capteurs avec les données de l'API output: %s", equip_data)
                                                 for sensor in hass.data[DOMAIN][config_entry.entry_id]["sensors"]:
                                                     sensor.handle_state_update({"rest_data": equip_data})
+                                        elif json_data.get("code") in (300, 310, 401, 500):
+                                            _LOGGER.warning("Output API error code %s (%s). Refreshing token...", json_data.get("code"), json_data.get("message"))
+                                            break
                                     except json.JSONDecodeError as e:
                                         _LOGGER.warning("Impossible de décoder la réponse JSON de l'API output: %s", e)
                                 
