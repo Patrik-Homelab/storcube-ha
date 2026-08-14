@@ -189,12 +189,15 @@ class StorcubePowerNumber(NumberEntity):
                         data = await response.json()
                         if data.get("code") == 200:
                             return True
+                        elif data.get("code") == 300:
+                            _LOGGER.warning("Appareil hors ligne. Impossible de modifier la puissance: %s", data.get("message"))
+                            return False
                         else:
-                            _LOGGER.error(f"Échec de la mise à jour: {data.get('message')}")
+                            _LOGGER.error("Échec de la mise à jour: %s", data.get("message"))
                     else:
-                        _LOGGER.error(f"Erreur HTTP: {response.status}")
+                        _LOGGER.error("Erreur HTTP: %s", response.status)
         except Exception as e:
-            _LOGGER.error(f"Erreur lors de la modification de la puissance: {e}")
+            _LOGGER.error("Erreur lors de la modification de la puissance: %s", e)
 
         return False
 

@@ -789,8 +789,8 @@ class StorcubeStatusSensor(StorcubeBatterySensor):
         """Mettre à jour la valeur depuis les sources disponibles."""
         try:
             if self._websocket_data and "list" in self._websocket_data and self._websocket_data["list"]:
-                equip = self._websocket_data["list"][0]
-                self._attr_native_value = "En marche" if equip.get("isWork") == 1 else "Arrêté"
+                fg_online = equip.get("fgOnline", equip.get("rgOnline", 0))
+                self._attr_native_value = "Online" if (equip.get("isWork") == 1 and fg_online == 1) else "Offline"
                 self.async_write_ha_state()
         except Exception as e:
             _LOGGER.error("Error updating status: %s", e)
@@ -915,14 +915,18 @@ class StorcubeWorkStatusSensor(StorcubeBatterySensor):
             if self._websocket_data and "list" in self._websocket_data and self._websocket_data["list"]:
                 equip = self._websocket_data["list"][0]
                 work_status = equip.get("workStatus")
-                
-                status_map = {
-                    0: "Arrêté",
-                    1: "En fonctionnement",
-                    2: "En erreur"
-                }
-                
-                self._attr_native_value = status_map.get(work_status, "Inconnu")
+                fg_online = equip.get("fgOnline", equip.get("rgOnline", 0))
+                main_equip_online = equip.get("mainEquipOnline", 0)
+
+                if fg_online == 0 or main_equip_online == 0:
+                    self._attr_native_value = "Offline"
+                else:
+                    status_map = {
+                        0: "Offline",
+                        1: "Online",
+                        2: "Error"
+                    }
+                    self._attr_native_value = status_map.get(work_status, "Offline")
                 self.async_write_ha_state()
         except Exception as e:
             _LOGGER.error("Error updating work status: %s", e)
@@ -942,13 +946,13 @@ class StorcubeOnlineSensor(StorcubeBatterySensor):
         try:
             if self._websocket_data and "list" in self._websocket_data and self._websocket_data["list"]:
                 equip = self._websocket_data["list"][0]
-                rg_online = equip.get("rgOnline")
-                main_equip_online = equip.get("mainEquipOnline")
+                fg_online = equip.get("fgOnline", equip.get("rgOnline", 0))
+                main_equip_online = equip.get("mainEquipOnline", 0)
                 
-                if rg_online == 1 and main_equip_online == 1:
-                    self._attr_native_value = "En ligne"
+                if fg_online == 1 and main_equip_online == 1:
+                    self._attr_native_value = "Online"
                 else:
-                    self._attr_native_value = "Hors ligne"
+                    self._attr_native_value = "Offline"
                 self.async_write_ha_state()
         except Exception as e:
             _LOGGER.error("Error updating online status: %s", e)
@@ -1314,18 +1318,24 @@ async def output_api_to_mqtt(hass: HomeAssistant, config: ConfigType, config_ent
                                                 _LOGGER.info("Mise à jour des capteurs avec les données de l'API output: %s", equip_data)
                                                 for sensor in hass.data[DOMAIN][config_entry.entry_id]["sensors"]:
                                                     sensor.handle_state_update({"rest_data": equip_data})
+                                                
+                                                # Dynamic poll delay: 60s if offline (fgOnline == 0), 30s if online
+                                                is_online = (equip_data.get("fgOnline") == 1 and equip_data.get("mainEquipOnline") == 1)
+                                                poll_delay = 30 if is_online else 60
+                                                await asyncio.sleep(poll_delay)
+                                                continue
                                         elif json_data.get("code") in (300, 310, 401, 500):
                                             _LOGGER.warning("Output API error code %s (%s). Refreshing token...", json_data.get("code"), json_data.get("message"))
                                             break
                                     except json.JSONDecodeError as e:
                                         _LOGGER.warning("Impossible de décoder la réponse JSON de l'API output: %s", e)
                                 
-                                # Attendre 30 secondes avant le prochain appel
+                                # Default poll delay
                                 await asyncio.sleep(30)
                                 
                             except Exception as e:
                                 _LOGGER.error("Erreur lors de l'appel à l'API output: %s", str(e))
-                                await asyncio.sleep(5)
+                                await asyncio.sleep(15)
                                 continue
 
             except Exception as e:
