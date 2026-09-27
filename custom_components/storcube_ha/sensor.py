@@ -517,20 +517,19 @@ class StorcubeBatteryStatusSensor(SensorEntity):
 
     @callback
     def handle_state_update(self, payload: dict[str, Any]) -> None:
-        """Handle state update from MQTT."""
+        """Handle state update from MQTT/REST/WS."""
         try:
-            if isinstance(payload, dict) and "list" in payload and payload["list"]:
-                # Prendre le premier équipement de la liste
-                equip = payload["list"][0]
-                if "isWork" in equip:
-                    self._attr_native_value = 'online' if equip["isWork"] == 1 else 'offline'
-                else:
-                    _LOGGER.warning("isWork non trouvé dans l'équipement: %s", equip)
-                    self._attr_native_value = 'unknown'
-            else:
-                _LOGGER.warning("Structure de payload invalide: %s", payload)
-                self._attr_native_value = 'unknown'
-            self.async_write_ha_state()
+            equip = None
+            if isinstance(payload, dict):
+                if "list" in payload and payload["list"]:
+                    equip = payload["list"][0]
+                elif "rest_data" in payload and isinstance(payload["rest_data"], dict):
+                    equip = payload["rest_data"]
+
+            if equip and ("isWork" in equip or "workStatus" in equip):
+                is_work = equip.get("isWork", 1 if equip.get("workStatus") == 1 else 0)
+                self._attr_native_value = 'online' if is_work == 1 else 'offline'
+                self.async_write_ha_state()
         except Exception as e:
             _LOGGER.error("Error updating battery status: %s", e)
             _LOGGER.debug("Payload reçu: %s", payload)
@@ -789,9 +788,12 @@ class StorcubeStatusSensor(StorcubeBatterySensor):
         """Mettre à jour la valeur depuis les sources disponibles."""
         try:
             if self._websocket_data and "list" in self._websocket_data and self._websocket_data["list"]:
-                fg_online = equip.get("fgOnline", equip.get("rgOnline", 0))
-                self._attr_native_value = "Online" if (equip.get("isWork") == 1 and fg_online == 1) else "Offline"
-                self.async_write_ha_state()
+                equip = self._websocket_data["list"][0]
+                if "isWork" in equip or "workStatus" in equip or "fgOnline" in equip or "rgOnline" in equip:
+                    is_work = equip.get("isWork", 1 if equip.get("workStatus") == 1 else 0)
+                    fg_online = equip.get("fgOnline", equip.get("rgOnline", 1))
+                    self._attr_native_value = "Online" if (is_work == 1 and fg_online == 1) else "Offline"
+                    self.async_write_ha_state()
         except Exception as e:
             _LOGGER.error("Error updating status: %s", e)
 
@@ -914,20 +916,21 @@ class StorcubeWorkStatusSensor(StorcubeBatterySensor):
         try:
             if self._websocket_data and "list" in self._websocket_data and self._websocket_data["list"]:
                 equip = self._websocket_data["list"][0]
-                work_status = equip.get("workStatus")
-                fg_online = equip.get("fgOnline", equip.get("rgOnline", 0))
-                main_equip_online = equip.get("mainEquipOnline", 0)
+                if "workStatus" in equip:
+                    work_status = equip.get("workStatus")
+                    fg_online = equip.get("fgOnline", equip.get("rgOnline", 1))
+                    main_equip_online = equip.get("mainEquipOnline", 1)
 
-                if fg_online == 0 or main_equip_online == 0:
-                    self._attr_native_value = "Offline"
-                else:
-                    status_map = {
-                        0: "Offline",
-                        1: "Online",
-                        2: "Error"
-                    }
-                    self._attr_native_value = status_map.get(work_status, "Offline")
-                self.async_write_ha_state()
+                    if fg_online == 0 or main_equip_online == 0:
+                        self._attr_native_value = "Offline"
+                    else:
+                        status_map = {
+                            0: "Offline",
+                            1: "Online",
+                            2: "Error"
+                        }
+                        self._attr_native_value = status_map.get(work_status, "Offline")
+                    self.async_write_ha_state()
         except Exception as e:
             _LOGGER.error("Error updating work status: %s", e)
 
@@ -946,14 +949,15 @@ class StorcubeOnlineSensor(StorcubeBatterySensor):
         try:
             if self._websocket_data and "list" in self._websocket_data and self._websocket_data["list"]:
                 equip = self._websocket_data["list"][0]
-                fg_online = equip.get("fgOnline", equip.get("rgOnline", 0))
-                main_equip_online = equip.get("mainEquipOnline", 0)
-                
-                if fg_online == 1 and main_equip_online == 1:
-                    self._attr_native_value = "Online"
-                else:
-                    self._attr_native_value = "Offline"
-                self.async_write_ha_state()
+                if "fgOnline" in equip or "rgOnline" in equip or "mainEquipOnline" in equip:
+                    fg_online = equip.get("fgOnline", equip.get("rgOnline", 0))
+                    main_equip_online = equip.get("mainEquipOnline", 1)
+                    
+                    if fg_online == 1 and main_equip_online == 1:
+                        self._attr_native_value = "Online"
+                    else:
+                        self._attr_native_value = "Offline"
+                    self.async_write_ha_state()
         except Exception as e:
             _LOGGER.error("Error updating online status: %s", e)
 

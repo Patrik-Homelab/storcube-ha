@@ -142,9 +142,12 @@ class StorcubeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class StorcubeOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle Storcube options."""
 
-    def __init__(self, config_entry):
+    def __init__(self, config_entry=None):
         """Initialize options flow."""
-        self.config_entry = config_entry
+        try:
+            self.config_entry = config_entry
+        except AttributeError:
+            pass
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
@@ -156,7 +159,10 @@ class StorcubeOptionsFlowHandler(config_entries.OptionsFlow):
                 await self._test_credentials(user_input)
                 
                 # Update the config entry
-                return self.async_create_entry(title="", data=user_input)
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data={**self.config_entry.data, **user_input}
+                )
+                return self.async_create_entry(title="", data={})
             
             except CannotConnect:
                 errors["base"] = "cannot_connect"
@@ -167,7 +173,7 @@ class StorcubeOptionsFlowHandler(config_entries.OptionsFlow):
                 errors["base"] = "unknown"
 
         # Préparer les valeurs par défaut à partir de la configuration existante
-        current_config = self.config_entry.data
+        current_config = {**self.config_entry.data, **self.config_entry.options}
         
         return self.async_show_form(
             step_id="init",
